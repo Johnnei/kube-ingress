@@ -1,13 +1,7 @@
 package main
 
 import (
-	"errors"
-	"fmt"
-	"log"
-	"os"
-	"os/exec"
-	"reflect"
-	"text/template"
+    "fmt"
 
 	"github.com/alecthomas/kingpin"
 	"k8s.io/kubernetes/pkg/api"
@@ -15,40 +9,6 @@ import (
 	"k8s.io/kubernetes/pkg/fields"
 	"k8s.io/kubernetes/pkg/labels"
 	"k8s.io/kubernetes/pkg/util"
-)
-
-const (
-	tpl = `events {
-  worker_connections  4096;
-}
-    
-http {
-    real_ip_header    X-Forwarded-For;
-    set_real_ip_from  0.0.0.0/0;
-    real_ip_recursive on;
-
-{{ range $ud, $upstream := .Upstreams }}
-    upstream {{ $upstream.Name }} {
-        ip_hash;
-{{ range $ad, $address := $upstream.Addresses }}
-        server {{ $address }};
-{{ end }}
-    }
-{{ end }}
-
-{{ range $sd, $server := .Servers }}
-    server {
-        listen      {{ $.Port }};
-        server_name {{ $server.Domain }};
-
-{{ range $ld, $location := $server.Locations }}
-        location {{ $location.Path }} {
-            proxy_pass http://{{ $location.Upstream }};
-        }
-{{ end }}
-    }
-{{ end }}
-}`
 )
 
 var (
@@ -60,135 +20,75 @@ var (
 func main() {
 	kingpin.Parse()
 
-	// Create a client which we can use to connect to the remote Kubernetes cluster.
-	config := &client.Config{
-		Host: *cliApi,
-	}
-	kubeClient, err := client.New(config)
-	Check(err)
-
-	// The template which will get used to expose Ingresses.
-	tmpl, err := template.New("nginx").Parse(tpl)
-	Check(err)
-
-	var (
-		ingClient   = kubeClient.Extensions().Ingress(api.NamespaceAll)
-		rateLimiter = util.NewTokenBucketRateLimiter(0.1, 1)
-		known       = &Nginx{}
-	)
+    // Create a client which we can use to connect to the remote Kubernetes cluster.
+    kubeClient, err := client.New(&client.Config{
+        Host: *cliApi,
+    })
+    Check(err)
+    
+    ingClient := kubeClient.Extensions().Ingress(api.NamespaceAll)
+    rl := util.NewTokenBucketRateLimiter(0.1, 1)
+    svcs := NewServices(kubeClient)
+    nginx, err := NewNginx(*cliPort)
+    Check(err)
 
 	// Controller loop.
 	for {
-		rateLimiter.Accept()
-
-		nginx := NewNginx(*cliPort)
+		rl.Accept()
 
 		// Query for the current list of ingresses.
-		ingresses, err := ingClient.List(labels.Everything(), fields.Everything())
+		ings, err := ingClient.List(labels.Everything(), fields.Everything())
 		if err != nil {
-			log.Printf("Error retrieving ingresses: %v", err)
+			fmt.Printf("Error retrieving ingresses: %v", err)
 			continue
 		}
 
 		// Ensure we have ingress items.
-		if len(ingresses.Items) <= 0 {
-			log.Printf("No ingresses were found", err)
+		if len(ings.Items) <= 0 {
+			fmt.Printf("No ingresses were found", err)
 			continue
 		}
 
 		// Load up the pods for the service in this ingress.
-		for _, i := range ingresses.Items {
+		for _, i := range ings.Items {
 			// Build a our listeners based on the ingress rules.
 			for _, r := range i.Spec.Rules {
-				// Add this to the Server configuration.
-				svr := Server{
-					Domain: r.Host,
-				}
-
-				for _, pa := range r.HTTP.Paths {
-					// Add this to our list of paths to implement in Nginx.
-					np := Location{
+                var locations []Location
+                
+                for _, pa := range r.HTTP.Paths {
+                    // Get the list of backends from this rule.
+                    list, err := svcs.Get(pa.Backend.ServiceName)
+                    if err != nil {
+                        fmt.Println("Failed to get service pods: %s", err)
+                        continue
+                    }
+                    
+                    // We have a set of IPs so we are now free to add the upstream and location
+                    // to our nginx configuration and be a part of the next reload.
+                    nginx.AddUpstream(pa.Backend.ServiceName, list)
+               
+                    // Add this to our list of paths to implement in Nginx.
+					l := Location{
 						Path:     pa.Path,
 						Upstream: pa.Backend.ServiceName,
 					}
-					svr.Locations = append(svr.Locations, np)
-
-					// Add an Upstream to the list if it has not already been setup.
-					if _, ok := nginx.Upstreams[pa.Backend.ServiceName]; ok {
-						continue
-					}
-
-					u := Upstream{
-						Name: pa.Backend.ServiceName,
-					}
-
-					// First we need to load the service configuration from the backend.
-					s, err := kubeClient.Services(i.ObjectMeta.Namespace).Get(pa.Backend.ServiceName)
-					if err != nil {
-						log.Printf("Error retrieving service: %v", err)
-						continue
-					}
-
-					// Now we load all the pods for this service.
-					ps, err := kubeClient.Pods(i.ObjectMeta.Namespace).List(labels.SelectorFromSet(labels.Set(s.Spec.Selector)), fields.Everything())
-					if err != nil {
-						log.Printf("Error retrieving service: %v", err)
-						continue
-					}
-
-					// Populate the list of pod IPs.
-					for _, p := range ps.Items {
-						if p.Status.Phase != api.PodRunning {
-							continue
-						}
-						u.Addresses = append(u.Addresses, p.Status.PodIP+":"+pa.Backend.ServicePort.String())
-					}
-
-					// Add it to the list of upstreams.
-					nginx.Upstreams[pa.Backend.ServiceName] = u
+					locations = append(locations, l)
 				}
-
-				nginx.Servers = append(nginx.Servers, svr)
+                
+                // Add our list of generated locations to the nginx backend. These have been verified
+                // as having a backend so this is a safe operation.
+                if len(locations) > 0 {
+                    nginx.AddServer(r.Host, locations)
+                }
 			}
 		}
+        
+        err = nginx.Reload()
+        if err != nil {
+            fmt.Println(err)
+            continue
+        }
 
-		// Is this already our list of ingresses.
-		if reflect.DeepEqual(nginx, known) {
-			log.Println("Backend has not changed - No action was taken")
-			continue
-		}
-
-		// Write out the new configuration.
-		if w, err := os.Create(*cliCfg); err != nil {
-			log.Println("Failed to open %v: %v", tpl, err)
-		} else if err := tmpl.Execute(w, nginx); err != nil {
-			log.Println("Failed to write template %v", err)
-		}
-		err = shellOut("nginx -s reload")
-		if err != nil {
-			log.Println(err)
-			continue
-		}
-
-		// We only set this at the very end to ensure the service was restarted successfully.
-		known = nginx
-		log.Println("Successfully reloaded Nginx with updated Ingresses")
-	}
-}
-
-// Helper function execute commands on the commandline.
-func shellOut(cmd string) error {
-	out, err := exec.Command("sh", "-c", cmd).CombinedOutput()
-	if err != nil {
-		return errors.New(fmt.Sprintf("Failed to execute %v: %v, err: %v", cmd, string(out), err))
-	}
-	return nil
-}
-
-// Helper function to exit the application is errors.
-func Check(e error) {
-	if e != nil {
-		log.Println(e)
-		os.Exit(1)
+		fmt.Println("Successfully reloaded Nginx with updated Ingresses")
 	}
 }
