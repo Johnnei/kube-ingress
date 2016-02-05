@@ -1,9 +1,9 @@
 package main
 
 import (
-    "os"
-    "fmt"
-    "errors"
+	"errors"
+	"fmt"
+	"os"
 	"os/exec"
 )
 

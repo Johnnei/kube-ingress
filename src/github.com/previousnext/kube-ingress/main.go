@@ -1,7 +1,7 @@
 package main
 
 import (
-    "fmt"
+	"fmt"
 
 	"github.com/alecthomas/kingpin"
 	"k8s.io/kubernetes/pkg/api"
@@ -20,17 +20,17 @@ var (
 func main() {
 	kingpin.Parse()
 
-    // Create a client which we can use to connect to the remote Kubernetes cluster.
-    kubeClient, err := client.New(&client.Config{
-        Host: *cliApi,
-    })
-    Check(err)
-    
-    ingClient := kubeClient.Extensions().Ingress(api.NamespaceAll)
-    rl := util.NewTokenBucketRateLimiter(0.1, 1)
-    svcs := NewServices(kubeClient)
-    nginx, err := NewNginx(*cliPort)
-    Check(err)
+	// Create a client which we can use to connect to the remote Kubernetes cluster.
+	kubeClient, err := client.New(&client.Config{
+		Host: *cliApi,
+	})
+	Check(err)
+
+	ingClient := kubeClient.Extensions().Ingress(api.NamespaceAll)
+	rl := util.NewTokenBucketRateLimiter(0.1, 1)
+	svcs := NewServices(kubeClient)
+	nginx, err := NewNginx(*cliPort)
+	Check(err)
 
 	// Controller loop.
 	for {
@@ -49,45 +49,54 @@ func main() {
 			continue
 		}
 
+		var (
+			servers   = make(map[string][]Location)
+			upstreams = make(map[string][]string)
+		)
+
 		// Load up the pods for the service in this ingress.
 		for _, i := range ings.Items {
 			// Build a our listeners based on the ingress rules.
 			for _, r := range i.Spec.Rules {
-                var locations []Location
-                
-                for _, pa := range r.HTTP.Paths {
-                    // Get the list of backends from this rule.
-                    list, err := svcs.Get(pa.Backend.ServiceName)
-                    if err != nil {
-                        fmt.Println("Failed to get service pods: %s", err)
-                        continue
-                    }
-                    
-                    // We have a set of IPs so we are now free to add the upstream and location
-                    // to our nginx configuration and be a part of the next reload.
-                    nginx.AddUpstream(pa.Backend.ServiceName, list)
-               
-                    // Add this to our list of paths to implement in Nginx.
+				var locations []Location
+
+				for _, pa := range r.HTTP.Paths {
+					// Get the list of backends from this rule.
+					list, err := svcs.Get(pa.Backend.ServiceName)
+					if err != nil {
+						fmt.Println("Failed to get service pods: %s", err)
+						continue
+					}
+
+					// We have a set of IPs so we are now free to add the upstream and location
+					// to our nginx configuration and be a part of the next reload.
+					upstreams[pa.Backend.ServiceName] = list
+
+					// Add this to our list of paths to implement in Nginx.
 					l := Location{
 						Path:     pa.Path,
 						Upstream: pa.Backend.ServiceName,
 					}
 					locations = append(locations, l)
 				}
-                
-                // Add our list of generated locations to the nginx backend. These have been verified
-                // as having a backend so this is a safe operation.
-                if len(locations) > 0 {
-                    nginx.AddServer(r.Host, locations)
-                }
+
+				// Add our list of generated locations to the nginx backend. These have been verified
+				// as having a backend so this is a safe operation.
+				if len(locations) > 0 {
+					servers[r.Host] = locations
+				}
 			}
 		}
-        
-        err = nginx.Reload()
-        if err != nil {
-            fmt.Println(err)
-            continue
-        }
+
+		// Add the upstreams and servers to the nginx configuration.
+		nginx.SetServers(servers)
+		nginx.SetUpstreams(upstreams)
+
+		err = nginx.Reload()
+		if err != nil {
+			fmt.Println(err)
+			continue
+		}
 
 		fmt.Println("Successfully reloaded Nginx with updated Ingresses")
 	}
