@@ -39,13 +39,13 @@ func main() {
 		// Query for the current list of ingresses.
 		ings, err := ingClient.List(labels.Everything(), fields.Everything())
 		if err != nil {
-			fmt.Printf("Error retrieving ingresses: %v", err)
+			fmt.Printf("Error retrieving ingresses: %v\n", err)
 			continue
 		}
 
 		// Ensure we have ingress items.
 		if len(ings.Items) <= 0 {
-			fmt.Printf("No ingresses were found", err)
+			fmt.Printf("No ingresses were found\n", err)
 			continue
 		}
 
@@ -61,8 +61,10 @@ func main() {
 				var locations []Location
 
 				for _, pa := range r.HTTP.Paths {
+					name := MergeNameNameSpace(i.ObjectMeta.Namespace, pa.Backend.ServiceName)
+
 					// Get the list of backends from this rule.
-					list, err := svcs.Get(pa.Backend.ServiceName)
+					list, err := svcs.Get(name)
 					if err != nil {
 						fmt.Println("Failed to get service pods: %s", err)
 						continue
@@ -70,12 +72,12 @@ func main() {
 
 					// We have a set of IPs so we are now free to add the upstream and location
 					// to our nginx configuration and be a part of the next reload.
-					upstreams[pa.Backend.ServiceName] = list
+					upstreams[name] = list
 
 					// Add this to our list of paths to implement in Nginx.
 					l := Location{
 						Path:     pa.Path,
-						Upstream: pa.Backend.ServiceName,
+						Upstream: name,
 					}
 					locations = append(locations, l)
 				}

@@ -23,3 +23,8 @@ func Check(e error) {
 		os.Exit(1)
 	}
 }
+
+// Helper to merge the name and namespace of a service.
+func MergeNameNameSpace(ns, n string) string {
+	return ns + "-" + n
+}

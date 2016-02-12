@@ -25,7 +25,7 @@ func (s *Services) Start() {
 		// First we need to load the services.
 		svcs, err := s.Client.Services("").List(labels.Everything())
 		if err != nil {
-			fmt.Printf("Error retrieving services: %v", err)
+			fmt.Printf("Error retrieving services: %v\n", err)
 			continue
 		}
 
@@ -39,29 +39,31 @@ func (s *Services) Start() {
 
 			ps, err := s.Client.Pods(svc.ObjectMeta.Namespace).List(labels.SelectorFromSet(labels.Set(svc.Spec.Selector)), fields.Everything())
 			if err != nil {
-				fmt.Printf("Error retrieving service: %v", err)
+				fmt.Printf("Error retrieving service: %v\n", err)
 				continue
 			}
+
+			name := MergeNameNameSpace(svc.ObjectMeta.Namespace, svc.ObjectMeta.Name)
 
 			// Add all the running pods to the list.
 			for _, p := range ps.Items {
 				if p.Status.Phase != api.PodRunning {
-					fmt.Printf("Skipping pod %s for service %s", p.Name, svc.Name)
+					fmt.Printf("Skipping pod %s for service %s\n", p.Name, name)
 					continue
 				}
-				fmt.Printf("Added pod %s for service %s", p.Name, svc.Name)
+				fmt.Printf("Added pod %s for service %s\n", p.Name, name)
 				addrs = append(addrs, p.Status.PodIP+":80")
 			}
 
 			// Ensure we have some addresses, if we don't, we don't have to
 			// worry about adding this service.
 			if len(addrs) <= 0 {
-				fmt.Printf("The service %s did not contain any upstream servers", svc.ObjectMeta.Name)
+				fmt.Printf("The service %s did not contain any upstream servers\n", name)
 				continue
 			}
 
-			fmt.Printf("Added the service: %v", svc.ObjectMeta.Name)
-			newSvcs[svc.ObjectMeta.Name] = addrs
+			fmt.Printf("Added the service: %v\n", name)
+			newSvcs[name] = addrs
 		}
 
 		// Now that we have built the list we can hand it over so be used for Get() requests.
