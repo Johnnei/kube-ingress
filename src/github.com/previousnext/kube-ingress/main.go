@@ -24,13 +24,20 @@ func main() {
 	kubeClient, err := client.New(&client.Config{
 		Host: *cliApi,
 	})
-	Check(err)
+	if err != nil {
+		panic(err)
+	}
 
-	ingClient := kubeClient.Extensions().Ingress(api.NamespaceAll)
-	rl := util.NewTokenBucketRateLimiter(0.1, 1)
-	svcs := NewServices(kubeClient)
+	var (
+		ingClient = kubeClient.Extensions().Ingress(api.NamespaceAll)
+		rl        = util.NewTokenBucketRateLimiter(0.1, 1)
+		svcs      = NewServices(kubeClient)
+	)
+
 	nginx, err := NewNginx(*cliPort)
-	Check(err)
+	if err != nil {
+		panic(err)
+	}
 
 	// Controller loop.
 	for {

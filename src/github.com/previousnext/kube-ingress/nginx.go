@@ -18,7 +18,7 @@ http {
     set_real_ip_from  0.0.0.0/0;
     real_ip_recursive on;
 
-{{ range $ud, $addresses := .Upstreams }}
+{{ range $ud, $addresses := .New.Upstreams }}
     upstream {{ $ud }} {
         ip_hash;
 {{ range $ad, $address := $addresses }}
@@ -27,7 +27,7 @@ http {
     }
 {{ end }}
 
-{{ range $sd, $servers := .Servers }}
+{{ range $sd, $servers := .New.Servers }}
     server {
         listen      {{ $.Port }};
         server_name {{ $sd }};
@@ -47,32 +47,34 @@ type Location struct {
 	Upstream string
 }
 
+type Backend struct {
+	Servers   map[string][]Location
+	Upstreams map[string][]string
+}
+
 type Nginx struct {
 	Template *template.Template
 	Port     string
 
 	// New configuration to be compared with against the private values.
-	Servers   map[string][]Location
-	Upstreams map[string][]string
+	New Backend
 
-	// Private values only used for comparison.
-	servers   map[string][]Location
-	upstreams map[string][]string
+	// The previously reloaded values.
+	Prev Backend
 }
 
 func (n *Nginx) SetServers(l map[string][]Location) {
-	n.Servers = l
+	n.New.Servers = l
 }
 
 func (n *Nginx) SetUpstreams(l map[string][]string) {
-	n.Upstreams = l
+	n.New.Upstreams = l
 }
 
 func (n *Nginx) Reload() error {
 	// Has the configuration changed? If it has we can reload.
-	if reflect.DeepEqual(n.Servers, n.servers) && reflect.DeepEqual(n.Upstreams, n.upstreams) {
-		fmt.Println("Configuration has not changed. Not reloading the nginx daemon.")
-		return nil
+	if reflect.DeepEqual(n.New.Servers, n.Prev.Servers) && reflect.DeepEqual(n.New.Upstreams, n.Prev.Upstreams) {
+		return errors.New("Configuration has not changed. Not reloading the nginx daemon.")
 	}
 
 	// Build a new configuration.
@@ -87,6 +89,11 @@ func (n *Nginx) Reload() error {
 	if err != nil {
 		return err
 	}
+
+	// Set the previous values so Nginx doesn't continue to restart.
+	n.Prev.Servers = n.New.Servers
+	n.Prev.Upstreams = n.New.Upstreams
+
 	return nil
 }
 
@@ -102,13 +109,13 @@ func NewNginx(p string) (*Nginx, error) {
 	return &Nginx{
 		Template: tmpl,
 		Port:     p,
-
-		// Real configuration.
-		Servers:   make(map[string][]Location),
-		Upstreams: make(map[string][]string),
-
-		// Comparison properties.
-		servers:   make(map[string][]Location),
-		upstreams: make(map[string][]string),
+		New: Backend{
+			Servers:   make(map[string][]Location),
+			Upstreams: make(map[string][]string),
+		},
+		Prev: Backend{
+			Servers:   make(map[string][]Location),
+			Upstreams: make(map[string][]string),
+		},
 	}, nil
 }

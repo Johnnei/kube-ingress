@@ -3,7 +3,6 @@ package main
 import (
 	"errors"
 	"fmt"
-	"os"
 	"os/exec"
 )
 
@@ -14,14 +13,6 @@ func shellOut(cmd string) error {
 		return errors.New(fmt.Sprintf("Failed to execute %v: %v, err: %v", cmd, string(out), err))
 	}
 	return nil
-}
-
-// Helper function to exit the application is errors.
-func Check(e error) {
-	if e != nil {
-		fmt.Println(e)
-		os.Exit(1)
-	}
 }
 
 // Helper to merge the name and namespace of a service.
